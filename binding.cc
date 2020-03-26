@@ -381,10 +381,11 @@ struct Database {
     }
   }
 
-  leveldb::Status Open (const leveldb::Options& options,
-                        bool readOnly,
-                        const char* location) {
-    if (readOnly) {
+  leveldb::Status Open(const leveldb::Options &options, bool readOnly,
+                       bool asSecondary, const char *secondaryPath, const char *location) {
+    if (asSecondary) {
+      return rocksdb::DB::OpenAsSecondary(options, location, secondaryPath, &db_);
+    } else if (readOnly) {
       return rocksdb::DB::OpenForReadOnly(options, location, &db_);
     } else {
       return leveldb::DB::Open(options, location, &db_);
@@ -760,24 +761,29 @@ NAPI_METHOD(db_init) {
  * Worker class for opening a database.
  */
 struct OpenWorker final : public BaseWorker {
-  OpenWorker (napi_env env,
-              Database* database,
-              napi_value callback,
-              const std::string& location,
-              bool createIfMissing,
-              bool errorIfExists,
-              bool compression,
-              uint32_t writeBufferSize,
-              uint32_t blockSize,
-              uint32_t maxOpenFiles,
-              uint32_t blockRestartInterval,
-              uint32_t maxFileSize,
-              uint32_t cacheSize,
-              const std::string& infoLogLevel,
-              bool readOnly)
-    : BaseWorker(env, database, callback, "leveldown.db.open"),
-      readOnly_(readOnly),
-      location_(location) {
+  OpenWorker(napi_env env,
+             Database *database,
+             napi_value callback,
+             const std::string &location,
+             bool createIfMissing,
+             bool errorIfExists,
+             bool compression,
+             uint32_t writeBufferSize,
+             uint32_t blockSize,
+             uint32_t maxOpenFiles,
+             uint32_t blockRestartInterval,
+             uint32_t maxFileSize,
+             uint32_t cacheSize,
+             const std::string &infoLogLevel,
+             bool readOnly,
+             bool asSecondary,
+             const std::string &secondaryLocation)
+      : BaseWorker(env, database, callback, "leveldown.db.open"),
+        readOnly_(readOnly),
+        asSecondary_(asSecondary),
+        location_(location),
+        secondaryLocation_(secondaryLocation)
+  {
     options_.create_if_missing = createIfMissing;
     options_.error_if_exists = errorIfExists;
     options_.compression = compression
@@ -827,12 +833,14 @@ struct OpenWorker final : public BaseWorker {
   ~OpenWorker () {}
 
   void DoExecute () override {
-    SetStatus(database_->Open(options_, readOnly_, location_.c_str()));
+    SetStatus(database_->Open(options_, readOnly_, asSecondary_, secondaryLocation_, location_.c_str()));
   }
 
   leveldb::Options options_;
   bool readOnly_;
+  bool asSecondary_;
   std::string location_;
+  std::string secondaryLocation_;
 };
 
 /**
@@ -848,8 +856,10 @@ NAPI_METHOD(db_open) {
   bool errorIfExists = BooleanProperty(env, options, "errorIfExists", false);
   bool compression = BooleanProperty(env, options, "compression", true);
   bool readOnly = BooleanProperty(env, options, "readOnly", false);
+  bool asSecondary = BooleanProperty(env, options, "asSecondary", false);
 
   std::string infoLogLevel = StringProperty(env, options, "infoLogLevel");
+  std::string secondaryLocation = StringProperty(env, options, "secondaryLocation");
 
   uint32_t cacheSize = Uint32Property(env, options, "cacheSize", 8 << 20);
   uint32_t writeBufferSize = Uint32Property(env, options , "writeBufferSize" , 4 << 20);
@@ -860,12 +870,11 @@ NAPI_METHOD(db_open) {
   uint32_t maxFileSize = Uint32Property(env, options, "maxFileSize", 2 << 20);
 
   napi_value callback = argv[3];
-  OpenWorker* worker = new OpenWorker(env, database, callback, location,
-                                      createIfMissing, errorIfExists,
-                                      compression, writeBufferSize, blockSize,
-                                      maxOpenFiles, blockRestartInterval,
-                                      maxFileSize, cacheSize,
-                                      infoLogLevel, readOnly);
+  OpenWorker *worker =
+      new OpenWorker(env, database, callback, location, createIfMissing,
+                     errorIfExists, compression, writeBufferSize, blockSize,
+                     maxOpenFiles, blockRestartInterval, maxFileSize, cacheSize,
+                     infoLogLevel, readOnly, asSecondary, secondaryLocation);
   worker->Queue();
   delete [] location;
 
